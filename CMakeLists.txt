@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(nano_lsm LANGUAGES CXX)
+project(cracking_lsm LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,34 +11,34 @@ set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 add_subdirectory(third-party/abseil-cpp)
 add_subdirectory(third-party/emds-toolkit)
 
-add_library(nano_lsm INTERFACE)
-add_library(nano-lsm::nano-lsm ALIAS nano_lsm)
+add_library(cracking_lsm INTERFACE)
+add_library(cracking-lsm::cracking-lsm ALIAS cracking_lsm)
 
 target_include_directories(
-    nano_lsm
+    cracking_lsm
     INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
 
-target_compile_features(nano_lsm INTERFACE cxx_std_23)
-target_link_libraries(nano_lsm INTERFACE absl::btree emds-toolkit::emds-toolkit)
+target_compile_features(cracking_lsm INTERFACE cxx_std_23)
+target_link_libraries(cracking_lsm INTERFACE absl::btree emds-toolkit::emds-toolkit)
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
-    set(NANO_LSM_BUILD_TESTS_DEFAULT ON)
+    set(CRACKING_LSM_BUILD_TESTS_DEFAULT ON)
 else()
-    set(NANO_LSM_BUILD_TESTS_DEFAULT OFF)
+    set(CRACKING_LSM_BUILD_TESTS_DEFAULT OFF)
 endif()
 
 option(
-    NANO_LSM_BUILD_TESTS
-    "Build nano-lsm tests"
-    ${NANO_LSM_BUILD_TESTS_DEFAULT}
+    CRACKING_LSM_BUILD_TESTS
+    "Build cracking-lsm tests"
+    ${CRACKING_LSM_BUILD_TESTS_DEFAULT}
 )
 
-unset(NANO_LSM_BUILD_TESTS_DEFAULT)
+unset(CRACKING_LSM_BUILD_TESTS_DEFAULT)
 
-if(NANO_LSM_BUILD_TESTS)
+if(CRACKING_LSM_BUILD_TESTS)
     if(NOT TARGET GTest::gtest_main)
         include(FetchContent)
 

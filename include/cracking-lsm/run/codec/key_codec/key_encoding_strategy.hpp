@@ -14,13 +14,14 @@
 
 #pragma once
 
-#include <nano-lsm/run/mutable_run/mutable_run_backend.hpp>
+#include <cstdint>
 
-namespace nano_lsm::detail {
+namespace cracking_lsm {
 
-/** @brief Storage-resident backend implemented in the external-storage step. */
-template <PhysicalKey KeyT, typename KeyComparatorT>
-requires KeyComparator<KeyComparatorT, KeyT>
-class MutableRunBackend<KeyT, Placement::StorageResident, KeyComparatorT>;
+/** @brief Identifies the encoding strategy used for a sequence of physical keys. */
+enum class KeyEncodingStrategyT : std::uint8_t {
+    /** @brief Fixed-width native object representation without key compression. */
+    native_fixed = 1,
+};
 
-}  // namespace nano_lsm::detail
+}  // namespace cracking_lsm

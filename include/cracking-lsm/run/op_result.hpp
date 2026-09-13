@@ -19,11 +19,11 @@
 #include <optional>
 #include <utility>
 
-#include <nano-lsm/run/run_entry/run_entry.hpp>
+#include <cracking-lsm/kv_entry/entry_meta.hpp>
 
-namespace nano_lsm {
+namespace cracking_lsm {
 
-/** @brief Result state returned by mutable and immutable run lookups. */
+/** @brief Result state returned by building and sealed Run lookups. */
 enum class LookupState : std::uint8_t {
     not_found,
     value,
@@ -65,13 +65,13 @@ struct LookupResult {
     std::optional<PayloadRefT> payload_ref = std::nullopt;
 };
 
-/** @brief State returned after atomically appending one batch to a mutable run. */
+/** @brief State returned after a complete batch is successfully appended to a building Run. */
 struct AppendResult {
-    /** @brief Total number of entries after the append. */
+    /** @brief Total number of physical entries, including duplicates, after the append. */
     std::size_t num_total_entries = 0;
 
-    /** @brief Whether the mutable run reached its threshold and now requires sealing. */
+    /** @brief Whether the building Run reached its threshold and now requires sealing. */
     bool seal_required = false;
 };
 
-}  // namespace nano_lsm
+}  // namespace cracking_lsm

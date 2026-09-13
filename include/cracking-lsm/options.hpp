@@ -17,27 +17,27 @@
 #include <cstddef>
 #include <filesystem>
 
-namespace nano_lsm {
+namespace cracking_lsm {
 
-/** @brief Runtime layout and L1 flush-threshold configuration shared by run implementations. */
+/** @brief Runtime block layout and physical-entry seal threshold for a file-resident Run. */
 struct RunOptions {
-    /** @brief External-memory page size in bytes. */
-    std::size_t page_bytes = 4096;
+    /** @brief Logical external-memory block size; it must satisfy Direct I/O alignment. */
+    std::size_t block_bytes = 4096;
 
-    /** @brief Entry count at which a mutable run must be sealed. */
+    /** @brief Positive physical-entry seal threshold; zero is unset and must be rejected by Run::create. */
     std::size_t max_entries = 0;
 };
 
-/** @brief Paths and memory budget used while converting a mutable run to an immutable run. */
+/** @brief Paths and sorting memory budget used while sealing a building Run. */
 struct SealOptions {
-    /** @brief Final path of the immutable run. */
+    /** @brief Final path of the published sealed Run. */
     std::filesystem::path output_path;
 
     /** @brief Directory used for external-sort working files. */
     std::filesystem::path scratch_directory;
 
-    /** @brief Maximum number of pages available to the external sorter. */
-    std::size_t memory_budget_pages = 256;
+    /** @brief Maximum number of blocks available to the external sorter. */
+    std::size_t memory_budget_blocks = 256;
 };
 
-}  // namespace nano_lsm
+}  // namespace cracking_lsm

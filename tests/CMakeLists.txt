@@ -1,11 +1,12 @@
-add_executable(nano_lsm_tests nano_lsm_test.cpp)
+add_executable(cracking_lsm_tests cracking_lsm_test.cpp)
 
-target_link_libraries(nano_lsm_tests PRIVATE nano-lsm::nano-lsm)
+target_link_libraries(cracking_lsm_tests PRIVATE cracking-lsm::cracking-lsm)
 
-add_test(NAME nano_lsm_tests COMMAND nano_lsm_tests)
+add_test(NAME cracking_lsm_tests COMMAND cracking_lsm_tests)
 
-add_executable(nano_lsm_gtests entry_codec_test.cpp memory_resident_run_test.cpp)
-target_link_libraries(nano_lsm_gtests PRIVATE nano-lsm::nano-lsm GTest::gtest_main)
+add_executable(cracking_lsm_gtests
+    kv_entry_test.cpp native_codec_test.cpp block_format_test.cpp run_file_test.cpp)
+target_link_libraries(cracking_lsm_gtests PRIVATE cracking-lsm::cracking-lsm GTest::gtest_main)
 
 include(GoogleTest)
-gtest_discover_tests(nano_lsm_gtests)
+gtest_discover_tests(cracking_lsm_gtests)

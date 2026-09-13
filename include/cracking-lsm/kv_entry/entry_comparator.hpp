@@ -16,17 +16,17 @@
 
 #include <utility>
 
-#include <nano-lsm/run/run_entry/key_concept.hpp>
-#include <nano-lsm/run/run_entry/run_entry.hpp>
+#include <cracking-lsm/kv_entry/key_concept.hpp>
+#include <cracking-lsm/kv_entry/kv_entry.hpp>
 
-namespace nano_lsm {
+namespace cracking_lsm {
 
-/** @brief Orders RunEntry objects by key and then by descending packed version-and-kind. */
-template <PhysicalKey KeyT, typename KeyComparatorT>
+/** @brief Orders KVEntry objects by key and then by descending packed version-and-kind. */
+template <PhysicalKey KeyT, typename KeyComparatorT, bool KeyOnly = false>
 requires KeyComparator<KeyComparatorT, KeyT>
 class EntryComparator {
 public:
-    using EntryT = RunEntry<KeyT>;
+    using EntryT = KVEntry<KeyT, KeyOnly>;
     using is_transparent = void;
 
     /** @brief Creates an entry comparator from the user-supplied key comparator. */
@@ -41,7 +41,7 @@ public:
         if (key_comparator_(rhs.key, lhs.key)) {
             return false;
         }
-        return lhs.version_and_kind > rhs.version_and_kind;
+        return lhs.metadata.version_and_kind > rhs.metadata.version_and_kind;
     }
 
     /** @brief Compares an entry with a heterogeneous user-key lookup target. */
@@ -63,4 +63,4 @@ private:
     KeyComparatorT key_comparator_;
 };
 
-}  // namespace nano_lsm
+}  // namespace cracking_lsm

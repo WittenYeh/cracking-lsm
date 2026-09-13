@@ -17,7 +17,7 @@
 #include <concepts>
 #include <type_traits>
 
-namespace nano_lsm {
+namespace cracking_lsm {
 
 /**
  * @brief A fixed-size key whose object representation is its persisted physical representation.
@@ -34,11 +34,11 @@ concept PhysicalKey =
     std::is_standard_layout_v<KeyT> &&
     std::has_unique_object_representations_v<KeyT>;
 
-/** @brief Comparator contract used to establish a strict weak ordering over physical keys. */
+/** @brief Shared comparator contract establishing a strict weak ordering over physical keys. */
 template <typename KeyComparatorT, typename KeyT>
 concept KeyComparator =
     PhysicalKey<KeyT> &&
     std::copy_constructible<KeyComparatorT> &&
     std::strict_weak_order<KeyComparatorT, const KeyT&, const KeyT&>;
 
-}  // namespace nano_lsm
+}  // namespace cracking_lsm
