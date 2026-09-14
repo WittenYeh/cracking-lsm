@@ -17,29 +17,20 @@
 #include <functional>
 
 #include <cracking-lsm/options.hpp>
-#include <cracking-lsm/run/block/block_descriptor.hpp>
-#include <cracking-lsm/run/block/block_format.hpp>
-#include <cracking-lsm/run/block/block_view.hpp>
-#include <cracking-lsm/run/codec/key_codec/key_encoding_strategy.hpp>
-#include <cracking-lsm/run/codec/key_codec/key_codec.hpp>
-#include <cracking-lsm/run/codec/key_codec/native_key_codec.hpp>
-#include <cracking-lsm/run/codec/meta_codec/meta_codec.hpp>
-#include <cracking-lsm/run/codec/meta_codec/native_meta_codec.hpp>
-#include <cracking-lsm/engine/op_result/append_result.hpp>
+#include <cracking-lsm/kv_entry/key_concept.hpp>
+#include <cracking-lsm/kv_entry/kv_entry.hpp>
+#include <cracking-lsm/engine/op_result/insertion_result.hpp>
 #include <cracking-lsm/engine/op_result/lookup_result.hpp>
 #include <cracking-lsm/engine/op_result/predecessor_result.hpp>
-#include <cracking-lsm/run/run_file.hpp>
-#include <cracking-lsm/run/run_state.hpp>
-#include <cracking-lsm/kv_entry/entry_comparator.hpp>
-#include <cracking-lsm/kv_entry/key_concept.hpp>
-#include <cracking-lsm/kv_entry/entry_meta.hpp>
-#include <cracking-lsm/kv_entry/kv_entry.hpp>
 
 namespace cracking_lsm {
 
-/** @brief File-resident Run lifecycle and query interface, implemented in later steps. */
+/**
+ * @brief Independent in-memory KVEntry buffer, defined in later implementation steps.
+ * @tparam KeyOnly Omits entry payload references when true; defaults to false.
+ */
 template <PhysicalKey KeyT, typename KeyComparatorT = std::less<KeyT>, bool KeyOnly = false>
 requires KeyComparator<KeyComparatorT, KeyT>
-class Run;
+class Memtable;
 
 }  // namespace cracking_lsm
