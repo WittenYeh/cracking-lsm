@@ -14,49 +14,57 @@
 
 #pragma once
 
-#include <utility>
+#include <functional>
+#include <type_traits>
 
 #include <cracking-lsm/kv_entry/key_concept.hpp>
 #include <cracking-lsm/kv_entry/kv_entry.hpp>
 
 namespace cracking_lsm {
 
-/** @brief Orders KVEntry objects by key and then by descending packed version-and-kind. */
-template <PhysicalKey KeyT, typename KeyComparatorT, bool KeyOnly = false>
-requires KeyComparator<KeyComparatorT, KeyT>
+/**
+ * @brief Orders KVEntry objects by key and then by descending packed version-and-kind.
+ * Comparisons convert results to bool before logical operations, matching KeyComparator's noexcept contract.
+ */
+template <PhysicalKey KeyT, KeyComparator<KeyT> KeyComparatorT, bool KeyOnly = false>
 class EntryComparator {
 public:
     using EntryT = KVEntry<KeyT, KeyOnly>;
     using is_transparent = void;
 
-    /** @brief Creates an entry comparator from the user-supplied key comparator. */
-    explicit EntryComparator(KeyComparatorT key_comparator = KeyComparatorT{})
-        : key_comparator_(std::move(key_comparator)) {}
+    /** @brief Copies the user-supplied key comparator without invoking its move constructor. */
+    explicit EntryComparator(const KeyComparatorT& key_comparator = KeyComparatorT{})
+        noexcept(std::is_nothrow_copy_constructible_v<KeyComparatorT>) : key_comparator_(key_comparator) {}
+
+    // Rvalues also use these copies, preserving the comparator's copy exception guarantees.
+    EntryComparator(const EntryComparator&) = default;
+    auto operator=(const EntryComparator&) -> EntryComparator& = default;
 
     /** @brief Orders two entries as `(key ascending, version-and-kind descending)`. */
-    [[nodiscard]] auto operator()(const EntryT& lhs, const EntryT& rhs) const -> bool {
-        if (key_comparator_(lhs.key, rhs.key)) {
+    [[nodiscard]] auto operator()(const EntryT& lhs, const EntryT& rhs) const noexcept -> bool {
+        if (std::invoke_r<bool>(key_comparator_, lhs.key, rhs.key)) {
             return true;
         }
-        if (key_comparator_(rhs.key, lhs.key)) {
+        if (std::invoke_r<bool>(key_comparator_, rhs.key, lhs.key)) {
             return false;
         }
         return lhs.metadata.version_and_kind > rhs.metadata.version_and_kind;
     }
 
     /** @brief Compares an entry with a heterogeneous user-key lookup target. */
-    [[nodiscard]] auto operator()(const EntryT& lhs, const KeyT& rhs) const -> bool {
-        return key_comparator_(lhs.key, rhs);
+    [[nodiscard]] auto operator()(const EntryT& lhs, const KeyT& rhs) const noexcept -> bool {
+        return std::invoke_r<bool>(key_comparator_, lhs.key, rhs);
     }
 
     /** @brief Compares a heterogeneous user-key lookup target with an entry. */
-    [[nodiscard]] auto operator()(const KeyT& lhs, const EntryT& rhs) const -> bool {
-        return key_comparator_(lhs, rhs.key);
+    [[nodiscard]] auto operator()(const KeyT& lhs, const EntryT& rhs) const noexcept -> bool {
+        return std::invoke_r<bool>(key_comparator_, lhs, rhs.key);
     }
 
     /** @brief Reports whether two keys are equivalent under the user-supplied ordering. */
-    [[nodiscard]] auto keys_equal(const KeyT& lhs, const KeyT& rhs) const -> bool {
-        return !key_comparator_(lhs, rhs) && !key_comparator_(rhs, lhs);
+    [[nodiscard]] auto keys_equal(const KeyT& lhs, const KeyT& rhs) const noexcept -> bool {
+        return !std::invoke_r<bool>(key_comparator_, lhs, rhs) &&
+            !std::invoke_r<bool>(key_comparator_, rhs, lhs);
     }
 
 private:

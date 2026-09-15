@@ -34,11 +34,12 @@ concept PhysicalKey =
     std::is_standard_layout_v<KeyT> &&
     std::has_unique_object_representations_v<KeyT>;
 
-/** @brief Shared comparator contract establishing a strict weak ordering over physical keys. */
+/** @brief Const-callable strict weak ordering with non-throwing invocation and conversion to bool. */
 template <typename KeyComparatorT, typename KeyT>
 concept KeyComparator =
     PhysicalKey<KeyT> &&
     std::copy_constructible<KeyComparatorT> &&
-    std::strict_weak_order<KeyComparatorT, const KeyT&, const KeyT&>;
+    std::strict_weak_order<const KeyComparatorT&, const KeyT&, const KeyT&> &&
+    std::is_nothrow_invocable_r_v<bool, const KeyComparatorT&, const KeyT&, const KeyT&>;
 
 }  // namespace cracking_lsm

@@ -30,17 +30,17 @@ using KeyT = std::uint64_t;
 using EntryT = KVEntry<KeyT>;
 
 struct InvalidKeyComparator {
-    auto operator()(std::string_view lhs, std::string_view rhs) const -> bool {
+    auto operator()(std::string_view lhs, std::string_view rhs) const noexcept -> bool {
         return lhs < rhs;
     }
 };
 
-static_assert(KeyComparator<std::less<KeyT>, KeyT>);
+static_assert(KeyComparator<std::less<>, KeyT>);
 static_assert(!KeyComparator<InvalidKeyComparator, KeyT>);
 
 /** @brief Verifies key ascending, packed version-and-kind descending, and ignored payload ordering. */
 TEST(KVEntryTest, EntryComparatorEstablishesInternalKeyOrder) {
-    const EntryComparator<KeyT, std::less<KeyT>> comparator;
+    const EntryComparator<KeyT, std::less<>> comparator;
     const auto key_one = EntryT::make(1, 10, 4);
     const auto key_two = EntryT::make(2, 10, 4);
     const auto newest = EntryT::make(1, 10, 7);

@@ -38,8 +38,7 @@
 namespace cracking_lsm {
 
 /** @brief File-resident Run lifecycle and query interface, implemented in later steps. */
-template <PhysicalKey KeyT, typename KeyComparatorT = std::less<KeyT>, bool KeyOnly = false>
-requires KeyComparator<KeyComparatorT, KeyT>
+template <PhysicalKey KeyT, KeyComparator<KeyT> KeyComparatorT = std::less<>, bool KeyOnly = false>
 class Run;
 
 }  // namespace cracking_lsm
