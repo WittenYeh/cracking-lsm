@@ -18,7 +18,7 @@ reserved implementation step; its design is deferred.
 
 Run data resides in files. Memtable capacity and Run lifecycle are separate concepts. Typed entries,
 comparators, codecs, and block views remain available for operations on caller-owned memory.
-File appends use one aligned block buffer and preserve physical input order, including duplicates.
+File appends borrow an aligned block buffer and preserve physical input order, including duplicates.
 
 The shared `cracking_lsm::KVEntry<KeyT, KeyOnly>` type and its metadata, comparator, and key concepts
 live in `include/cracking-lsm/kv_entry/`. Include `<cracking-lsm/kv_entry/kv_entry.hpp>` to use entries
@@ -36,8 +36,63 @@ and can be returned by value. Query results own optional entry copies; public pr
 contain a visible value or no entry. These runtime result objects are separate from the persisted
 entry format. The engine's planned `Table` interface will coordinate operations across sources.
 
-The current implementation provides the entry and block formats and the internal building-file
-component `cracking_lsm::detail::RunFile<KeyT, KeyOnly>`, with Abseil already introduced as a dependency.
+The current implementation provides the entry and block formats and a two-layer building Run:
+`run/run.hpp` implements file operations and public policies, while `run/run_impl.hpp` owns their state.
+`Run<KeyT, KeyComparatorT, KeyOnly>` in `run/run.hpp` supports `create(path, options, comparator)`
+with a positive `max_entries`, an aligned `block_bytes`, and capacity for at least one entry per block.
+Configuration validation precedes file creation, and an existing path is never overwritten.
+`append_batch(entries, io_buffer)` accepts at most one block-capacity batch in physical input order, including
+duplicates. The entire batch that reaches or crosses `max_entries` is accepted, sets `seal_required`,
+and returns an `AppendResult` with the actual total count and flag. Later appends throw `std::logic_error`,
+including empty batches; an empty batch before the threshold performs no I/O and returns the current state.
+The Run remains `RunState::building`; reaching the threshold does not sort, deduplicate, or seal it.
+
+`size()`, `empty()`, `max_entries()`, `block_bytes()`, `block_capacity()`, `seal_required()`, and `state()`
+observe a usable Run without file I/O. State checks and complete batch validation precede writes;
+invalid input preserves existing file contents and counts. I/O failure can leave partial writes and
+makes all normal operations reject access, including state observations. Only a complete successful
+append updates the physical count and seal flag and produces an `AppendResult`.
+`scan(io_buffer, visitor)` reads every physical entry in append order, including duplicates and tombstones,
+using the borrowed aligned buffer. It does not apply snapshot visibility. Visitor exceptions propagate;
+I/O and decoding errors mark the Run failed. Entry references are valid only during each visitor call.
+`RunImpl` holds the path, configuration, copied comparator, block capacity, physical count,
+`run_state`, seal flag, failure flag, and cleanup ownership. Its `run_file` member directly owns an
+optional `emds::io::DirectIOFile`, which owns the descriptor without an I/O buffer.
+Run owns it through a `unique_ptr<RunImplT>`, so moves transfer ownership without invoking comparator operations.
+Comparator copies may throw during creation, before any working file is opened; comparisons remain `noexcept`.
+`clear()` closes and removes the temporary working file, and destruction also attempts cleanup.
+Moving transfers cleanup responsibility; failed, moved-from, or cleared Runs permit cleanup and reassignment.
+Run stores no buffer, index, or array that grows with the entry count. Each nonempty append or scan
+requires a caller-owned `emds::io::DirectIOBuffer` with at least `block_bytes()` bytes; only the first
+block-sized region is used. An empty or undersized required buffer is rejected before I/O without
+marking the Run failed. Empty appends and empty scans do not use the buffer.
+Creation, append, scan, validation, and explicit cleanup live in Run. RunImpl initializes state and
+releases its owned resources on destruction; there is no separate RunFile class or nested State owner.
+
+Allocate a buffer once with `DirectIOBuffer::make(capacity_bytes)` and reuse it across Runs after each
+operation completes. Opening, moving, or clearing a Run does not allocate or release this memory.
+During an operation, keep the buffer alive and exclusive; a scan visitor must not lend it to another
+Run, overwrite it, or move it. Input entries must not overlap the buffer region used by append.
+This is reusable I/O workspace, with no block cache or buffer pool. For example:
+
+```cpp
+#include <array>
+#include <cstdint>
+#include <cracking-lsm/run/run.hpp>
+
+void append_to_two_runs() {
+    using RunT = cracking_lsm::Run<std::uint64_t>;
+    auto io_buffer = RunT::DirectIOBufferT::make(4096);
+    const cracking_lsm::RunOptions options{.block_bytes = 4096, .max_entries = 1024};
+    auto first = RunT::create("run-a.bin", options);
+    auto second = RunT::create("run-b.bin", options);
+    const std::array entries{RunT::EntryT::make(1, 100, 1)};
+    static_cast<void>(first.append_batch(entries, io_buffer));
+    static_cast<void>(second.append_batch(entries, io_buffer));
+    first.scan(io_buffer, [](const RunT::EntryT& entry) { /* consume entry */ });
+}
+```
+
 `Memtable<KeyT, KeyComparatorT, KeyOnly>` in `memtable/memtable.hpp` now supports creation, single-entry
 insertion, snapshot point and predecessor queries, state observation, movement, and destruction.
 `create` requires a positive `memtable_bytes`;
@@ -85,5 +140,5 @@ provides non-throwing comparisons, and Memtable additionally requires non-throwi
 Memtable and Run default to `std::less<>`, whose exception specification follows the key's `<`
 operation. Custom comparators should declare `operator()` as `const noexcept`. Violating a `noexcept`
 promise invokes termination without the former Memtable comparison diagnostic wrapper.
-Cross-source query routing, public `Run` lifecycle, sorting, and sealed B+Tree construction
+Cross-source query routing, file Run queries, sealing, sorting, and sealed B+Tree construction
 are planned in later implementation steps.
