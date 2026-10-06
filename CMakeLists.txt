@@ -6,9 +6,12 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(ABSL_PROPAGATE_CXX_STD ON)
-set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-add_subdirectory(third-party/abseil-cpp)
+set(TBB_TEST OFF CACHE BOOL "" FORCE)
+set(TBB_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(TBB_STRICT OFF CACHE BOOL "" FORCE)
+set(TBBMALLOC_BUILD OFF CACHE BOOL "" FORCE)
+set(TBB_INSTALL OFF CACHE BOOL "" FORCE)
+add_subdirectory(third-party/oneTBB)
 add_subdirectory(third-party/emds-toolkit)
 
 add_library(cracking_lsm INTERFACE)
@@ -22,7 +25,7 @@ target_include_directories(
 )
 
 target_compile_features(cracking_lsm INTERFACE cxx_std_23)
-target_link_libraries(cracking_lsm INTERFACE absl::btree emds-toolkit::emds-toolkit)
+target_link_libraries(cracking_lsm INTERFACE TBB::tbb emds-toolkit::emds-toolkit)
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     set(CRACKING_LSM_BUILD_TESTS_DEFAULT ON)

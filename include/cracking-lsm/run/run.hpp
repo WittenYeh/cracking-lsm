@@ -44,7 +44,6 @@
 #include <cracking-lsm/run/codec/meta_codec/native_meta_codec.hpp>
 #include <cracking-lsm/engine/op_result/append_result.hpp>
 #include <cracking-lsm/engine/op_result/lookup_result.hpp>
-#include <cracking-lsm/engine/op_result/predecessor_result.hpp>
 #include <cracking-lsm/run/run_impl.hpp>
 #include <cracking-lsm/run/run_state.hpp>
 #include <cracking-lsm/kv_entry/entry_comparator.hpp>

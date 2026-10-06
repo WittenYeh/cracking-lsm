@@ -25,10 +25,8 @@ namespace cracking_lsm {
 class InsertionResult final : public OpResult {
 public:
     /** @brief Records the actual insertion outcome and all post-operation counters. */
-    InsertionResult(InsertionState status_value, std::size_t total_entries, std::size_t node_bytes,
-        bool requires_flush) noexcept
-        : status(status_value), num_total_entries(total_entries), allocated_bytes(node_bytes),
-          flush_required(requires_flush) {}
+    InsertionResult(InsertionState status_value, std::size_t total_entries, bool requires_flush) noexcept
+        : status(status_value), num_total_entries(total_entries), flush_required(requires_flush) {}
 
     [[nodiscard]] auto operation() const noexcept -> OpKind override {
         return OpKind::insertion;
@@ -40,10 +38,7 @@ public:
     /** @brief Physical entry count after the attempt, including duplicates, versions, and tombstones. */
     std::size_t num_total_entries;
 
-    /** @brief Live node allocation bytes after the attempt, using the MemtableOptions accounting scope. */
-    std::size_t allocated_bytes;
-
-    /** @brief True for a full Memtable, including an accepted entry that reaches the byte threshold. */
+    /** @brief True for a full Memtable, including an accepted entry that reaches the entry threshold. */
     bool flush_required;
 };
 

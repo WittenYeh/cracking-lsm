@@ -9,12 +9,20 @@
 
 # cracking-lsm
 
-[cracking-lsm](https://github.com/WittenYeh/cracking-lsm) is a C++ project for a B-tree memtable and file-resident runs in a tiered Log-Structured Merge-tree (LSM-tree).
+[cracking-lsm](https://github.com/WittenYeh/cracking-lsm) is a C++ project for a concurrent memtable and file-resident runs in a tiered Log-Structured Merge-tree (LSM-tree).
 
-The planned write path inserts into an independent Abseil B-tree memtable, with a `memtable_bytes`
-flush threshold based on live node allocation bytes. Point and predecessor queries consult the
-memtable before storage and reconcile visible versions across sources. Memtable flush has a
-reserved implementation step; its design is deferred.
+The write path uses an independent oneTBB `concurrent_multiset` Memtable, with a `max_entries`
+flush threshold based on stored physical key entries (including duplicates, versions, and tombstones). The planned root also owns a disk overflow log:
+insertion spills existing entries to that log when memory is needed; a query encountering overflow
+pushes the complete root buffer to children. The overflow protocol is planned, not implemented.
+
+The build links `TBB::tbb` from the official oneTBB repository (`https://github.com/uxlfoundation/oneTBB.git`),
+pinned to the v2023.1.0 baseline `3046c8b0c29df995980003ea24f4d78c80ec0c8d`, and emds-toolkit.
+Initialize dependencies with `git submodule update --init --recursive`. Existing checkouts can update
+the oneTBB remote with `git submodule sync -- third-party/oneTBB`. The project uses the unmodified
+upstream implementation and its forward-only iterators; no oneTBB source extensions are planned.
+Abseil remains introduced as a submodule but is no longer
+built or linked by the main library. oneTBB tests, examples and its optional malloc library are disabled.
 
 Run data resides in files. Memtable capacity and Run lifecycle are separate concepts. Typed entries,
 comparators, codecs, and block views remain available for operations on caller-owned memory.
@@ -26,13 +34,13 @@ independently of Run. `RunState` belongs to `run/run_state.hpp`; entries carry a
 payload reference and support versions, tombstones, and key-only mode.
 
 Shared operation results live in `include/cracking-lsm/engine/op_result/`, with one header per
-result: `insertion_result.hpp`, `lookup_result.hpp`, `predecessor_result.hpp`, and `append_result.hpp`.
+result: `insertion_result.hpp`, `lookup_result.hpp`, `successor_result.hpp`, and `append_result.hpp`.
 Include the specific header, such as `<cracking-lsm/engine/op_result/insertion_result.hpp>`, as needed.
 The abstract `OpResult` interface lives in `op_result.hpp`, identifies the operation, and has a
 virtual destructor. `InsertionState` and `QueryState` have their own `insertion_state.hpp` and
 `query_state.hpp` headers. `InsertionResult`,
-`LookupResult<KeyT, KeyOnly>`, `PredecessorResult<KeyT, KeyOnly>`, and `AppendResult` derive from it
-and can be returned by value. Query results own optional entry copies; public predecessor results
+`LookupResult<KeyT, KeyOnly>`, `SuccessorResult<KeyT, KeyOnly>`, and `AppendResult` derive from it
+and can be returned by value. Query results own optional entry copies; public successor results
 contain a visible value or no entry. These runtime result objects are separate from the persisted
 entry format. The engine's planned `Table` interface will coordinate operations across sources.
 
@@ -93,52 +101,94 @@ void append_to_two_runs() {
 }
 ```
 
-`Memtable<KeyT, KeyComparatorT, KeyOnly>` in `memtable/memtable.hpp` now supports creation, single-entry
-insertion, snapshot point and predecessor queries, state observation, movement, and destruction.
-`create` requires a positive `memtable_bytes`;
-`size()`, `empty()`, `allocated_bytes()`, `memtable_bytes()`, and `flush_required()` expose its state and configuration.
-`insert(entry)` validates the entry kind and physical count before copying an entry into the B-tree.
-It retains duplicate entries, historical versions, and tombstones in the shared comparator order.
-An insertion that reaches or crosses the live-byte threshold still returns `InsertionState::inserted`
-and sets `flush_required=true`. Later valid insertions return `InsertionState::memtable_full` without
-accepting the entry. Each `InsertionResult` reports the actual post-operation count, allocated bytes,
-and flush flag. Invalid input is still rejected by validation when full; validation errors leave
-existing data, allocation counts, and the flush flag unchanged. A positive threshold smaller than the
-first node permits the first entry and then requires a flush; this step only reports that requirement.
+`Memtable<KeyT, KeyComparatorT, KeyOnly>` in `memtable/memtable.hpp` supports creation, insertion,
+version-filtered point and successor queries, state observation, movement, and destruction.
+`create` requires positive `max_entries`; an empty index has zero entries.
+`size()`, `empty()`, `max_entries()`, and `flush_required()` expose its state.
+Each insertion keeps one physical entry, including duplicates, historical versions and tombstones.
 
-`lookup(key, read_version)` returns the latest visible entry for a comparator-equivalent key as a
-`LookupResult`: value, tombstone, or not_found. At equal versions, a tombstone takes precedence.
-`predecessor(key, read_version)` returns a `PredecessorResult` containing the greatest visible,
-undeleted key strictly before the bound in comparator order, or not_found. It resolves each key's
-latest visible version before checking for deletion, so a tombstone never exposes that key's older
-value. Both const queries default to `EntryMeta<KeyOnly>::MaxVersion`, reject larger read versions
-before searching, and return owned entry copies in both payload-reference and key-only modes.
-They remain available when full and preserve entry counts, allocated bytes, and the flush flag.
-Point lookup uses a compound-key B-tree bound in O(log N); predecessor uses one user-key bound and
-group traversal in O(log N + E), where E counts examined physical entries. Empty queries take O(1),
-and each query uses O(1) extra space. Returned entries survive later insertion, movement, or destruction.
+Memtable and Run share `EntryComparator`: keys follow the user comparator, while versions and kinds
+remain descending within each key group. Memtable uses the official oneTBB public bound methods
+and forward-only iterators directly; it has no reverse comparator adapter.
 
-`MemtableImpl<KeyT, KeyComparatorT, KeyOnly>` in `memtable/memtable_impl.hpp` holds the configuration,
-accounting object, B-tree types and storage, and flush flag. It lives in the `cracking_lsm` namespace;
-its `validate_insertion(entry) const` checks the entry kind and the tree's actual count, and
-`insert_entry(entry)` validates before inserting. It also implements entry lookup and predecessor
-traversal. `predecessor_entry` directly scans preceding key groups and returns a value or no entry,
-skipping groups whose latest visible entry is a tombstone. Planned Table reconciliation uses point
-lookups across sources to check the visible version and deletion state of each possible predecessor.
-`Memtable` privately owns the implementation through `impl_`, a `unique_ptr<ImplT>`, and handles
-public interfaces, capacity policy, and operation results.
-Moving a Memtable transfers its `unique_ptr`, preserves the accounting object's address, and carries
-the flush flag with the data. Tree nodes are destroyed before the accounting object.
-`memtable/memory_accounting.hpp` defines `cracking_lsm::MemoryAccounting` and
-`cracking_lsm::CountingAllocator<T>`. The allocator wraps `std::allocator`, shares live
-request-byte counts across copies and rebinds, and releases memory through the standard allocator.
-It does not use an arena or enforce the memtable threshold during allocation.
-Shared fatal-error reporting lives in `utils/error.hpp`; the allocator reports allocation errors with
-context before termination. All user key comparators must be callable through a const reference,
-with non-throwing invocation and conversion of the result to `bool`. `EntryComparator` directly
-provides non-throwing comparisons, and Memtable additionally requires non-throwing comparator copies.
-Memtable and Run default to `std::less<>`, whose exception specification follows the key's `<`
-operation. Custom comparators should declare `operator()` as `const noexcept`. Violating a `noexcept`
-promise invokes termination without the former Memtable comparison diagnostic wrapper.
-Cross-source query routing, file Run queries, sealing, sorting, and sealed B+Tree construction
-are planned in later implementation steps.
+`lookup(key, read_version)` returns the newest eligible value or tombstone, or not_found.
+`successor(key, read_version)` returns the least visible, undeleted key strictly after the bound in
+user-comparator order. It excludes the entire equal-key group and skips groups whose newest
+eligible entry is a tombstone, without exposing older values. The queries use a compound
+`lower_bound` and a user-key `upper_bound`, respectively. Expected sequential costs are O(log N)
+for point lookup and O(log N + E) for successor, where E is the number of entries examined.
+Both use O(1) extra space, return owned copies, and remain available when the Memtable is full.
+
+The strict successor satisfies `comp(query_key, candidate_key)` and excludes every entry in the
+comparator-equivalent query group. Each candidate group is resolved to its newest visible version
+before deciding whether to return it or skip the group. The former `predecessor` API,
+`PredecessorResult` and `OpKind::predecessor` have been replaced by `successor`, `SuccessorResult`
+and `OpKind::successor`. Run, StorageNode, LeafBucket and Table query plans adopt the same contract;
+their file and global queries remain future work.
+
+Choose the comparator when creating the index to select the desired **natural-key direction**:
+
+| User comparator | Key order | `successor(25)` with visible, undeleted keys 10, 20, 30, 40 |
+|---|---|---|
+| `std::less<>` or a comparator returning `lhs < rhs` | Small keys first (ascending) | 30: natural-order successor |
+| `std::greater<>` or a comparator returning `lhs > rhs` | Large keys first (descending) | 20: natural-order predecessor |
+
+Thus users who need a natural-order predecessor select a descending comparator and call the
+same successor API. It remains a successor relative to that comparator. This is an **ascending vs.
+descending ordering** decision, not little-endian vs. big-endian byte order (sometimes called
+"large endian"). Endianness describes byte representation and does not choose the query direction.
+Custom comparators must obey the existing strict-weak-order, `noexcept`, non-throwing-copy and
+concurrent-use requirements. All components of an index must use the same ordering and comparator
+state; changing direction requires rebuilding the index. This API provides one direction per
+configured index, not efficient queries in both natural-key directions on the same index.
+
+Insertions, queries and observers can run concurrently. A query overlapping insertions is weakly
+consistent: `read_version` is a data-version ceiling, not a stable MVCC snapshot or commit watermark.
+For a stable view, the caller must exclude writes for the duration of the query. Comparators,
+including their copies and any shared state, must support concurrent use. Move, assignment,
+destruction and any future erase/spill require external exclusion of all operations on the object.
+Run and the planned storage engine do not acquire thread safety through this Memtable change.
+
+A successful insertion observes the completed physical entry count and sets a sticky atomic flush
+flag when it reaches or exceeds `max_entries`. With sequential insertion and `max_entries = 1000`,
+the first 1000 entries are accepted, the 1000th requests a flush, and the next is rejected.
+Duplicates, historical versions and tombstones each consume one entry; this is not a distinct-key
+limit. Later insertions that observe the flag return `memtable_full`; insertions already admitted
+may still complete above the threshold. Invalid entries are still rejected when full.
+`InsertionResult` contains `status`, `num_total_entries`, and `flush_required`; concurrent observations
+need not describe a single instant. After writers finish, counts match the stored entries.
+The flag reports that a flush is required; automatic spill and root transfer remain future work.
+
+`MemtableImpl` owns the index, immutable configuration, insertion reservations, completed-entry
+count and flush flag. Reservations protect against concurrent count overflow; the completed count
+keeps `size()` O(1) instead of aggregating oneTBB's per-thread counters. The implementation remains
+owned by `unique_ptr`, so moves transfer ownership without moving the comparator or index.
+
+Memtable uses `concurrent_multiset`'s default `tbb_allocator<EntryT>`, with no custom allocator or
+memory byte accounting. Entry alignment must not exceed `alignof(std::max_align_t)`; over-aligned
+entry types are rejected at compile time. This restriction applies to Memtable, not the shared key concept.
+Comparisons and comparator copies remain non-throwing. Preflight errors propagate before the
+entry is modified; allocation and unexpected insertion failures report request context through
+`utils/error.hpp` and terminate.
+
+The final planned evaluation step (Step 43, after integration) will measure stored physical entry
+count against the memory footprint of the in-memory data structure. It will publish raw samples,
+plots and regression models for threshold selection, covering key size/alignment, both KeyOnly
+modes, thread counts and input distributions. Separate measurements will distinguish live heap
+allocations, allocator retention and process RSS; key-count thresholds do not promise a RAM limit.
+A baseline model is `memory_bytes = intercept + bytes_per_entry * physical_entries`, with reported
+fit error and a validated measurement range. Models and plots are planned, not yet measured, and
+will provide user guidance without entering the runtime flush decision.
+
+The earlier reverse-order predecessor implementation passed 64 focused tests with GCC 14.3.0 /
+C++23 Debug, ASan, UBSan and leak detection: 42 Memtable, 6 comparator and 16 memory-accounting cases.
+Its reverse-order queries were
+checked against an unsorted reference model with custom orders, equivalent keys, versions and
+tombstones in both KeyOnly modes. Concurrent insertion/query cases also passed; these checks do
+not establish fixed MVCC snapshots, exhaustive concurrency coverage or performance bounds.
+The successor migration updated the existing Memtable cases and moved the comparator cases to
+`tests/entry_comparator_test.cpp`. The physical-entry threshold change also migrated the existing
+capacity checks and retired the memory-accounting tests. No new test cases were added and the
+changed code has not been compiled or tested. The old 64/64 result validates neither the successor
+implementation nor the entry-count threshold; their verification remains Step 17.
+Cross-source routing, root overflow handling, file queries, sealing and sorting remain later work.

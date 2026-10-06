@@ -19,18 +19,17 @@
 
 namespace cracking_lsm {
 
-/** @brief Node-allocation byte threshold for an independent in-memory Memtable. */
+/** @brief Physical-entry flush threshold for an independent in-memory Memtable. */
 struct MemtableOptions {
     /**
-     * @brief Positive flush trigger in live B-tree allocation bytes; zero is unset.
+     * @brief Positive flush trigger in stored physical entries; zero is unset.
      *
-     * Counts node headers, entry slots, unused node capacity, and node alignment padding.
-     * Fixed-size owner/counter objects, allocator bookkeeping, external payloads, file buffers,
-     * and sorting memory are excluded.
-     * Creation must reject zero. The threshold is checked after accepting a complete insertion,
-     * which may exceed it; it is not a hard allocator limit.
+     * Each duplicate, historical version, and tombstone counts as one stored entry.
+     * Creation must reject zero. The insertion reaching the threshold is accepted and requests a flush;
+     * already admitted concurrent insertions may also finish above the threshold.
+     * This count is independent of node layout and does not impose a memory-byte limit.
      */
-    std::size_t memtable_bytes = 0;
+    std::size_t max_entries = 0;
 };
 
 /** @brief Runtime block layout and physical-entry seal threshold for a file-resident Run. */

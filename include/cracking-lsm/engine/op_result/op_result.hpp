@@ -22,7 +22,7 @@ namespace cracking_lsm {
 enum class OpKind : std::uint8_t {
     insertion,
     lookup,
-    predecessor,
+    successor,
     append,
 };
 

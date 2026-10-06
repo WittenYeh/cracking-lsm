@@ -21,7 +21,7 @@
 namespace cracking_lsm::utils {
 
 /**
- * @brief Reports a fatal error with caller-supplied allocation context, then terminates.
+ * @brief Reports a fatal error with caller-supplied request context, then terminates.
  * @pre component, operation, and reason are non-null, null-terminated strings.
  *
  * A non-null detail supplies optional exception information. All numeric values are supplied by the
@@ -29,12 +29,11 @@ namespace cracking_lsm::utils {
  * Diagnostic output is best-effort; a write or flush failure must still terminate.
  */
 [[noreturn]] inline auto report_fatal_error(const char* component, const char* operation, const char* reason,
-    std::size_t count, std::size_t element_bytes, std::size_t allocated_bytes,
-    const char* detail = nullptr) noexcept -> void {
+    std::size_t count, std::size_t element_bytes, const char* detail = nullptr) noexcept -> void {
     std::fprintf(stderr,
         "cracking-lsm: %s::%s: %s "
-        "(count=%zu, element_bytes=%zu, allocated_bytes=%zu)%s%s\n",
-        component, operation, reason, count, element_bytes, allocated_bytes,
+        "(count=%zu, element_bytes=%zu)%s%s\n",
+        component, operation, reason, count, element_bytes,
         detail == nullptr ? "" : ": ", detail == nullptr ? "" : detail);
     std::fflush(stderr);
     std::terminate();

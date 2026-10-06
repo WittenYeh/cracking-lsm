@@ -40,7 +40,7 @@ public:
     EntryComparator(const EntryComparator&) = default;
     auto operator=(const EntryComparator&) -> EntryComparator& = default;
 
-    /** @brief Orders two entries as `(key ascending, version-and-kind descending)`. */
+    /** @brief Orders two entries by user key order, then descending packed version-and-kind. */
     [[nodiscard]] auto operator()(const EntryT& lhs, const EntryT& rhs) const noexcept -> bool {
         if (std::invoke_r<bool>(key_comparator_, lhs.key, rhs.key)) {
             return true;

@@ -14,45 +14,46 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
-#include <iterator>
+#include <exception>
 #include <limits>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
 
-#include <absl/container/btree_set.h>
+#include <oneapi/tbb/concurrent_set.h>
 
 #include <cracking-lsm/options.hpp>
 #include <cracking-lsm/kv_entry/key_concept.hpp>
 #include <cracking-lsm/kv_entry/kv_entry.hpp>
 #include <cracking-lsm/kv_entry/entry_comparator.hpp>
 #include <cracking-lsm/kv_entry/entry_meta.hpp>
-#include <cracking-lsm/memtable/memory_accounting.hpp>
+#include <cracking-lsm/utils/error.hpp>
 
 namespace cracking_lsm {
 
 /**
- * @brief Stable B-tree storage with checked insertion and snapshot queries owned by Memtable.
+ * @brief Concurrent ordered storage with checked insertion and version-filtered queries.
  *
- * The accounting object precedes the B-tree so nodes are released before their accounting state.
  * Moving the owning Memtable transfers its unique_ptr and preserves this object's address.
  */
 template <PhysicalKey KeyT, KeyComparator<KeyT> KeyComparatorT, bool KeyOnly>
 requires std::is_nothrow_copy_constructible_v<KeyComparatorT>
 struct MemtableImpl {
     using EntryT = KVEntry<KeyT, KeyOnly>;
-    using EntryComparatorT = EntryComparator<KeyT, KeyComparatorT, KeyOnly>;
-    using AllocatorT = CountingAllocator<EntryT>;
-    using TreeT = absl::btree_multiset<EntryT, EntryComparatorT, AllocatorT>;
+    static_assert(alignof(EntryT) <= alignof(std::max_align_t),
+        "Memtable does not support over-aligned entry types with the default TBB allocator");
 
-    /** @brief Builds an empty tree after the owning Memtable validates its options. */
+    using EntryComparatorT = EntryComparator<KeyT, KeyComparatorT, KeyOnly>;
+    using IndexT = oneapi::tbb::concurrent_multiset<EntryT, EntryComparatorT>;
+
+    /** @brief Builds an empty index after the owning Memtable validates its options. */
     MemtableImpl(MemtableOptions options_value, const KeyComparatorT& comparator)
-        : options(options_value),
-          entries(EntryComparatorT{comparator}, AllocatorT{accounting}) {}
+        : options(options_value), entries(EntryComparatorT{comparator}) {}
 
     /**
-     * @brief Checks one entry and the tree's current physical count before any modification.
+     * @brief Checks one entry and the index's reserved physical count before any modification.
      * @throws std::invalid_argument If the packed entry kind is unsupported.
      * @throws std::overflow_error If adding one entry would overflow the physical count.
      */
@@ -60,28 +61,45 @@ struct MemtableImpl {
         if (!entry.metadata.is_valid_kind()) {
             throw std::invalid_argument("Memtable insertion requires a valid entry kind");
         }
-        if (entries.size() == std::numeric_limits<std::size_t>::max()) {
+        if (reserved_entries.load(std::memory_order_relaxed) == std::numeric_limits<std::size_t>::max()) {
             throw std::overflow_error("Memtable insertion overflows the physical entry count");
         }
     }
 
     /**
-     * @brief Validates and copies one physical entry into the B-tree, including equivalent entries.
+     * @brief Validates and copies one physical entry into the concurrent index, including duplicates.
      *
-     * The tree owns its entry count; CountingAllocator tracks all node growth and releases.
+     * A reservation prevents concurrent insertions from overflowing the physical count.
+     * Completed insertions have a separate O(1) count; oneTBB's size() aggregates per-thread counts.
      * Capacity policy and InsertionResult belong to Memtable::insert.
-     * Validation errors propagate before modification. Node allocation failures terminate through
-     * the allocator, and comparisons follow the shared noexcept contract.
+     * Validation errors propagate before modification. Index insertion failures are reported here
+     * before termination, and comparisons follow the shared noexcept contract.
      */
     auto insert_entry(const EntryT& entry) -> void {
         validate_insertion(entry);
-        static_cast<void>(entries.insert(entry));
+        auto reserved = reserved_entries.load(std::memory_order_relaxed);
+        do {
+            if (reserved == std::numeric_limits<std::size_t>::max()) {
+                throw std::overflow_error("Memtable insertion overflows the physical entry count");
+            }
+        } while (!reserved_entries.compare_exchange_weak(reserved, reserved + 1, std::memory_order_relaxed));
+
+        try {
+            static_cast<void>(entries.insert(entry));
+        } catch (const std::exception& error) {
+            utils::report_fatal_error("Memtable", "insert", "index insertion failed", 1,
+                sizeof(EntryT), error.what());
+        } catch (...) {
+            utils::report_fatal_error("Memtable", "insert",
+                "index insertion failed with a non-standard exception", 1, sizeof(EntryT));
+        }
+        num_entries.fetch_add(1, std::memory_order_release);
     }
 
     /**
      * @brief Returns an owned copy of the latest visible entry for a comparator-equivalent key.
      *
-     * The compound probe skips newer versions in logarithmic time and selects tombstones first
+     * The compound probe skips newer versions in expected logarithmic time and selects tombstones first
      * at equal versions. No visible entry for the requested key yields an empty optional.
      * @throws std::invalid_argument If read_version exceeds the physical version field.
      */
@@ -95,46 +113,53 @@ struct MemtableImpl {
     }
 
     /**
-     * @brief Returns the latest visible value of the greatest undeleted key strictly before before_key.
+     * @brief Returns the latest visible value of the least undeleted key strictly after after_key.
      *
-     * After one tree search, resolves each preceding key group to its latest visible entry.
+     * After one upper-bound search, visits later keys in user-comparator order using forward iteration.
      * Invisible groups and groups deleted by a visible tombstone are skipped in the same traversal.
      * Returns an owned value entry or an empty optional; a tombstone is never returned.
      * @throws std::invalid_argument If read_version exceeds the physical version field.
      */
-    [[nodiscard]] auto predecessor_entry(const KeyT& before_key, VersionT read_version) const
+    [[nodiscard]] auto successor_entry(const KeyT& after_key, VersionT read_version) const
         -> std::optional<EntryT> {
         validate_read_version(read_version);
-        auto position = entries.lower_bound(before_key);
-        const auto first = entries.begin();
+        auto position = entries.upper_bound(after_key);
+        const auto last = entries.end();
         const auto comparator = entries.key_comp();
 
-        while (position != first) {
-            const auto group_last = std::prev(position);
-            const auto& group_key = group_last->key;
-            auto visible = entries.end();
-            do {
-                --position;
-                if (position->version() <= read_version) {
-                    // Reverse traversal visits older versions and smaller kinds first.
-                    visible = position;
+        while (position != last) {
+            const auto group_key = position->key;
+            while (position != last && comparator.keys_equal(position->key, group_key)) {
+                if (position->version() > read_version) {
+                    ++position;
+                    continue;
                 }
-            } while (position != first && comparator.keys_equal(std::prev(position)->key, group_key));
-
-            if (visible != entries.end() && visible->kind() == EntryKindT::valid) {
-                return *visible;
+                // The first visible entry wins; a tombstone hides all older versions of this key.
+                if (position->kind() == EntryKindT::valid) {
+                    return *position;
+                }
+                do {
+                    ++position;
+                } while (position != last && comparator.keys_equal(position->key, group_key));
+                break;
             }
         }
         return std::nullopt;
     }
 
+    /** @brief Immutable physical-entry flush threshold. */
     MemtableOptions options;
-    MemoryAccounting accounting;
-    TreeT entries;
-    bool flush_required = false;
+    /** @brief Keys in user-comparator order, with versions and kinds descending within each key. */
+    IndexT entries;
+    /** @brief Completed insertions, including physical duplicates; O(1) to observe. */
+    std::atomic<std::size_t> num_entries{0};
+    /** @brief Completed and in-flight insertion reservations used to prevent count overflow. */
+    std::atomic<std::size_t> reserved_entries{0};
+    /** @brief Sticky admission flag; already admitted concurrent insertions may still finish. */
+    std::atomic<bool> flush_required{false};
 
 private:
-    /** @brief Rejects out-of-range snapshots before any tree search, including on an empty tree. */
+    /** @brief Rejects out-of-range versions before any index search, including on an empty index. */
     static auto validate_read_version(VersionT read_version) -> void {
         if (read_version > EntryMeta<KeyOnly>::MaxVersion) {
             throw std::invalid_argument("Memtable query read_version exceeds its 56-bit physical field");

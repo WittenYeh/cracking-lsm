@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -27,21 +28,24 @@
 #include <cracking-lsm/kv_entry/entry_meta.hpp>
 #include <cracking-lsm/engine/op_result/insertion_result.hpp>
 #include <cracking-lsm/engine/op_result/lookup_result.hpp>
-#include <cracking-lsm/engine/op_result/predecessor_result.hpp>
+#include <cracking-lsm/engine/op_result/successor_result.hpp>
 #include <cracking-lsm/memtable/memtable_impl.hpp>
 
 namespace cracking_lsm {
 
 /**
- * @brief Move-only in-memory KVEntry buffer with shared B-tree node accounting.
+ * @brief Move-only concurrent KVEntry buffer with a physical-entry flush threshold.
  *
- * Public insertion accepts one complete entry before checking the node-allocation threshold.
+ * Public insertion accepts one complete entry before checking the stored-entry threshold.
  * A full Memtable retains its entries, remains queryable, and rejects further insertions.
- * Snapshot queries return owned entry copies that remain valid after insertion, movement, or destruction.
- * Instances are used by one thread at a time.
+ * Version-filtered queries return owned copies that survive insertion, movement, or destruction.
+ * Insertion, observation and queries may run concurrently. Queries overlapping inserts are weakly
+ * consistent; read_version is a version ceiling, not a fixed MVCC snapshot or commit watermark.
+ * Moving, assigning, destroying and future erasure require external exclusion of all operations.
  * Observation, insertion, and queries require an owned implementation;
  * a moved-from instance may only be destroyed or assigned a new Memtable.
- * @tparam KeyComparatorT Const-callable ordering with non-throwing comparison and copy construction.
+ * Entry alignment must not exceed alignof(std::max_align_t); the index uses the default TBB allocator.
+ * @tparam KeyComparatorT Thread-safe ordering with non-throwing comparison and copy construction.
  * @tparam KeyOnly Omits entry payload references when true; defaults to false.
  */
 template <PhysicalKey KeyT, KeyComparator<KeyT> KeyComparatorT = std::less<>, bool KeyOnly = false>
@@ -51,17 +55,16 @@ public:
     using EntryT = KVEntry<KeyT, KeyOnly>;
 
     /**
-     * @brief Creates an empty B-tree with zero allocated node bytes and a positive flush threshold.
+     * @brief Creates an empty concurrent index with a positive physical-entry flush threshold.
      *
-     * The fixed-size owner allocation is excluded from allocated_bytes(). The comparator is copied
-     * into that owner; creation neither allocates tree nodes nor compares keys.
-     * @throws std::invalid_argument If memtable_bytes is zero.
-     * @throws std::bad_alloc If the owner allocation fails before the B-tree is constructed.
+     * The comparator is copied into the owner; oneTBB allocates nodes on insertion.
+     * @throws std::invalid_argument If max_entries is zero.
+     * @throws std::bad_alloc If owner or oneTBB bookkeeping allocation fails during construction.
      */
     [[nodiscard]] static auto create(MemtableOptions options,
         const KeyComparatorT& comparator = KeyComparatorT{}) -> Memtable {
-        if (options.memtable_bytes == 0) {
-            throw std::invalid_argument("Memtable requires memtable_bytes greater than zero");
+        if (options.max_entries == 0) {
+            throw std::invalid_argument("Memtable requires max_entries greater than zero");
         }
         return Memtable{std::make_unique<ImplT>(options, comparator)};
     }
@@ -75,9 +78,12 @@ public:
     /**
      * @brief Inserts one physical entry unless an earlier insertion already required a flush.
      *
-     * An entry that reaches or crosses memtable_bytes() is accepted and sets flush_required().
-     * Later valid entries return memtable_full without changing the tree or its accounting.
-     * Input and count validation also apply to a full Memtable. Results contain post-operation counts.
+     * An entry that reaches or crosses max_entries() is accepted and sets flush_required().
+     * Duplicates, historical versions, and tombstones each count as one physical entry.
+     * Later valid entries return memtable_full without allocating nodes for the rejected entry.
+     * Concurrent insertions admitted before the flush flag is observed may finish and exceed the threshold.
+     * Input and count validation also apply to a full Memtable. Result fields are post-insertion
+     * observations; concurrent operations may change them and they are not one atomic state snapshot.
      * @throws std::invalid_argument If the packed entry kind is unsupported.
      * @throws std::overflow_error If adding one entry would overflow the physical count.
      * @pre This Memtable still owns its implementation.
@@ -85,20 +91,21 @@ public:
     [[nodiscard]] auto insert(const EntryT& entry) -> InsertionResult {
         if (flush_required()) {
             impl_->validate_insertion(entry);
-            return InsertionResult{
-                InsertionState::memtable_full, size(), allocated_bytes(), flush_required()};
+            return InsertionResult{InsertionState::memtable_full, size(), flush_required()};
         }
 
         impl_->insert_entry(entry);
-        impl_->flush_required = allocated_bytes() >= memtable_bytes();
-        return InsertionResult{InsertionState::inserted, size(), allocated_bytes(), flush_required()};
+        if (size() >= max_entries()) {
+            impl_->flush_required.store(true, std::memory_order_release);
+        }
+        return InsertionResult{InsertionState::inserted, size(), flush_required()};
     }
 
     /**
      * @brief Finds the latest visible entry for a comparator-equivalent key.
      *
      * Returns a value, a tombstone, or not_found. A tombstone wins over a value at the same version.
-     * The result owns its entry copy; the query does not change node accounting or the flush flag.
+     * The result owns its entry copy; the query does not change the entry count or the flush flag.
      * @throws std::invalid_argument If read_version exceeds EntryMeta<KeyOnly>::MaxVersion.
      * @pre This Memtable still owns its implementation.
      */
@@ -109,43 +116,39 @@ public:
     }
 
     /**
-     * @brief Finds the greatest visible, undeleted key strictly before key in comparator order.
+     * @brief Finds the least visible, undeleted key strictly after key in comparator order.
      *
-     * Excludes the entire comparator-equivalent query group. Each preceding group is resolved to its
+     * Excludes the entire comparator-equivalent query group. Each following group is resolved to its
      * latest visible entry before checking for deletion, so a tombstone never exposes an older value.
-     * The result owns its entry copy; the query does not change node accounting or the flush flag.
+     * The result owns its entry copy; the query does not change the entry count or the flush flag.
+     * An ascending comparator finds a natural-order successor; a descending one finds a predecessor.
      * @throws std::invalid_argument If read_version exceeds EntryMeta<KeyOnly>::MaxVersion.
      * @pre This Memtable still owns its implementation.
      */
-    [[nodiscard]] auto predecessor(const KeyT& key,
-        VersionT read_version = EntryMeta<KeyOnly>::MaxVersion) const -> PredecessorResult<KeyT, KeyOnly> {
-        const auto entry = impl_->predecessor_entry(key, read_version);
-        return entry ? PredecessorResult<KeyT, KeyOnly>{*entry} : PredecessorResult<KeyT, KeyOnly>{};
+    [[nodiscard]] auto successor(const KeyT& key,
+        VersionT read_version = EntryMeta<KeyOnly>::MaxVersion) const -> SuccessorResult<KeyT, KeyOnly> {
+        const auto entry = impl_->successor_entry(key, read_version);
+        return entry ? SuccessorResult<KeyT, KeyOnly>{*entry} : SuccessorResult<KeyT, KeyOnly>{};
     }
 
-    /** @brief Returns the B-tree's physical entry count, including any duplicate entries. */
+    /** @brief Returns the number of completed insertions, including physical duplicates. */
     [[nodiscard]] auto size() const noexcept -> std::size_t {
-        return impl_->entries.size();
+        return impl_->num_entries.load(std::memory_order_acquire);
     }
 
-    /** @brief Reports whether the B-tree contains no entries. */
+    /** @brief Reports whether no insertions have completed at the time of observation. */
     [[nodiscard]] auto empty() const noexcept -> bool {
-        return impl_->entries.empty();
+        return size() == 0;
     }
 
-    /** @brief Returns live B-tree allocation bytes, excluding the fixed-size owner. */
-    [[nodiscard]] auto allocated_bytes() const noexcept -> std::size_t {
-        return impl_->accounting.allocated_bytes();
-    }
-
-    /** @brief Returns the configured positive node-allocation threshold. */
-    [[nodiscard]] auto memtable_bytes() const noexcept -> std::size_t {
-        return impl_->options.memtable_bytes;
+    /** @brief Returns the configured positive physical-entry flush threshold. */
+    [[nodiscard]] auto max_entries() const noexcept -> std::size_t {
+        return impl_->options.max_entries;
     }
 
     /** @brief Reports whether an accepted insertion reached the threshold and further writes are blocked. */
     [[nodiscard]] auto flush_required() const noexcept -> bool {
-        return impl_->flush_required;
+        return impl_->flush_required.load(std::memory_order_acquire);
     }
 
 private:

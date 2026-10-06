@@ -27,36 +27,36 @@
 namespace cracking_lsm {
 
 /**
- * @brief An owned public predecessor result containing a visible value or no entry.
+ * @brief An owned public successor result containing a visible value or no entry.
  *
- * The query implementation selects the greatest visible, undeleted key strictly before its bound.
- * This result validates the entry kind; it does not select or verify the predecessor itself.
+ * The query selects the least visible, undeleted key strictly after its bound in comparator order.
+ * This result validates the entry kind; it does not select or verify the successor itself.
  */
 template <PhysicalKey KeyT, bool KeyOnly = false>
-class PredecessorResult final : public OpResult {
+class SuccessorResult final : public OpResult {
 public:
     using EntryT = KVEntry<KeyT, KeyOnly>;
 
-    /** @brief Creates a result with no visible, undeleted predecessor. */
-    PredecessorResult() = default;
+    /** @brief Creates a result with no visible, undeleted successor. */
+    SuccessorResult() = default;
 
     /** @brief Copies a visible value entry, rejecting tombstones and invalid entry kinds. */
-    explicit PredecessorResult(EntryT entry) : entry_(std::move(entry)) {
+    explicit SuccessorResult(EntryT entry) : entry_(std::move(entry)) {
         if (entry_->kind() != EntryKindT::valid) {
-            throw std::invalid_argument("PredecessorResult requires a valid entry kind");
+            throw std::invalid_argument("SuccessorResult requires a valid entry kind");
         }
     }
 
     [[nodiscard]] auto operation() const noexcept -> OpKind override {
-        return OpKind::predecessor;
+        return OpKind::successor;
     }
 
-    /** @brief Returns value or not_found; public predecessor results cannot contain tombstones. */
+    /** @brief Returns value or not_found; public successor results cannot contain tombstones. */
     [[nodiscard]] auto state() const noexcept -> QueryState {
         return entry_ ? QueryState::value : QueryState::not_found;
     }
 
-    /** @brief Returns the owned predecessor entry, including its key and visible version. */
+    /** @brief Returns the owned successor entry, including its key and visible version. */
     [[nodiscard]] auto entry() const noexcept -> const std::optional<EntryT>& {
         return entry_;
     }
