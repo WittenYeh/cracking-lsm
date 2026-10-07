@@ -133,6 +133,36 @@ Choose the comparator when creating the index to select the desired **natural-ke
 | `std::less<>` or a comparator returning `lhs < rhs` | Small keys first (ascending) | 30: natural-order successor |
 | `std::greater<>` or a comparator returning `lhs > rhs` | Large keys first (descending) | 20: natural-order predecessor |
 
+For example, this key-only program uses the current Memtable API:
+
+```cpp
+#include <array>
+#include <cassert>
+#include <cstdint>
+#include <functional>
+#include <cracking-lsm/memtable/memtable.hpp>
+
+int main() {
+    using namespace cracking_lsm;
+    using Ascending = Memtable<std::uint64_t, std::less<>, true>;
+    using Descending = Memtable<std::uint64_t, std::greater<>, true>;
+    auto ascending = Ascending::create({.max_entries = 4});
+    auto descending = Descending::create({.max_entries = 4});
+    for (const auto key : std::array<std::uint64_t, 4>{10, 20, 30, 40}) {
+        const auto entry = Ascending::EntryT::make(key, 1);
+        const auto a = ascending.insert(entry);
+        const auto d = descending.insert(entry);
+        assert(a.status == InsertionState::inserted && d.status == InsertionState::inserted);
+    }
+    assert(ascending.size() == 4 && ascending.flush_required());
+    assert(descending.size() == 4 && descending.flush_required());
+    const auto next = ascending.successor(25);
+    const auto previous = descending.successor(25);
+    assert(next.entry() && next.entry()->key == 30);
+    assert(previous.entry() && previous.entry()->key == 20);
+}
+```
+
 Thus users who need a natural-order predecessor select a descending comparator and call the
 same successor API. It remains a successor relative to that comparator. This is an **ascending vs.
 descending ordering** decision, not little-endian vs. big-endian byte order (sometimes called
@@ -180,15 +210,26 @@ A baseline model is `memory_bytes = intercept + bytes_per_entry * physical_entri
 fit error and a validated measurement range. Models and plots are planned, not yet measured, and
 will provide user guidance without entering the runtime flush decision.
 
-The earlier reverse-order predecessor implementation passed 64 focused tests with GCC 14.3.0 /
-C++23 Debug, ASan, UBSan and leak detection: 42 Memtable, 6 comparator and 16 memory-accounting cases.
-Its reverse-order queries were
-checked against an unsorted reference model with custom orders, equivalent keys, versions and
-tombstones in both KeyOnly modes. Concurrent insertion/query cases also passed; these checks do
-not establish fixed MVCC snapshots, exhaustive concurrency coverage or performance bounds.
-The successor migration updated the existing Memtable cases and moved the comparator cases to
-`tests/entry_comparator_test.cpp`. The physical-entry threshold change also migrated the existing
-capacity checks and retired the memory-accounting tests. No new test cases were added and the
-changed code has not been compiled or tested. The old 64/64 result validates neither the successor
-implementation nor the entry-count threshold; their verification remains Step 17.
+Step 17 validated the current successor implementation and physical-entry threshold with GCC 14.3.0 /
+C++23 Debug, ASan, UBSan and leak detection: **60/60 focused tests passed**, with no failures or skips
+(48 Memtable, 6 comparator and 6 SuccessorResult cases). Both KeyOnly modes cover custom orders,
+equivalent keys, historical versions, tombstones, result ownership, concurrent insertion/query and
+entry-count thresholds. An unsorted reference model checks point and successor results; a controlled
+concurrent case verifies that writers admitted before the flush flag may finish above the threshold.
+Maximum-supported entry alignment also passed at runtime. Separate compiler checks accepted
+`std::max_align_t` alignment and rejected over-aligned entries in both modes; eight relevant headers
+compiled independently, and the example above compiled and ran with the same sanitizers.
+
+The focused target is `cracking_lsm_memtable_tests`; after configuring the project, run:
+
+```sh
+cmake --build build --target cracking_lsm_memtable_tests
+ctest --test-dir build --output-on-failure --no-tests=error \
+    -R '^(MemtableTest|EntryComparatorTest|SuccessorResultTest)\.'
+```
+
+These results do not establish fixed MVCC snapshots, exhaustive concurrency coverage or performance
+bounds. TSan, allocation-failure injection and counter-overflow injection were not run. Run integration
+and the full project test suite remain unverified. The earlier reverse-order predecessor implementation's
+64 tests, including the retired memory-accounting cases, remain historical results.
 Cross-source routing, root overflow handling, file queries, sealing and sorting remain later work.

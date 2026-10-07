@@ -374,6 +374,143 @@ TYPED_TEST(MemtableTest, EntryCountReachesThresholdAndRejectsLaterInsertions) {
     }
 }
 
+TYPED_TEST(MemtableTest, ConcurrentWritersRespectTheStickyEntryThreshold) {
+    using MemtableT = typename TestFixture::MemtableT;
+    constexpr std::size_t writer_count = 8;
+    constexpr std::size_t attempts_per_writer = 64;
+    constexpr std::size_t attempts = writer_count * attempts_per_writer;
+
+    for (const std::size_t threshold : {1, 17, 128}) {
+        SCOPED_TRACE(threshold);
+        auto memtable = MemtableT::create({.max_entries = threshold});
+        std::array<bool, attempts> accepted{};
+        std::atomic<std::size_t> failures{0};
+        std::barrier start{static_cast<std::ptrdiff_t>(writer_count)};
+        std::vector<std::jthread> writers;
+        for (std::size_t writer = 0; writer < writer_count; ++writer) {
+            writers.emplace_back([&, writer] {
+                start.arrive_and_wait();
+                bool rejected = false;
+                for (std::size_t index = 0; index < attempts_per_writer; ++index) {
+                    const auto id = writer * attempts_per_writer + index;
+                    const auto result = memtable.insert(TestFixture::make_entry(id));
+                    accepted[id] = result.status == InsertionState::inserted;
+                    if ((rejected && accepted[id]) || (!accepted[id] && !result.flush_required)) {
+                        failures.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    rejected = rejected || !accepted[id];
+                }
+            });
+        }
+        writers.clear();
+
+        const auto count = static_cast<std::size_t>(std::count(accepted.begin(), accepted.end(), true));
+        EXPECT_EQ(failures.load(std::memory_order_relaxed), 0);
+        EXPECT_EQ(memtable.size(), count);
+        EXPECT_GE(count, threshold);
+        EXPECT_LE(count, threshold + writer_count - 1);
+        EXPECT_TRUE(memtable.flush_required());
+        for (std::size_t id = 0; id < attempts; ++id) {
+            EXPECT_EQ(memtable.lookup(id).state(), accepted[id] ? QueryState::value : QueryState::not_found);
+        }
+        expect_insertion_result(memtable.insert(TestFixture::make_entry(attempts)), memtable,
+            InsertionState::memtable_full, count, true);
+    }
+}
+
+/** @brief Pauses each armed writer at its first comparison, after public insertion admission. */
+struct AdmissionGateComparator {
+    std::barrier<>* gate;
+    static inline thread_local bool wait_on_next_comparison = false;
+
+    auto operator()(KeyT lhs, KeyT rhs) const noexcept -> bool {
+        if (wait_on_next_comparison) {
+            wait_on_next_comparison = false;
+            gate->arrive_and_wait();
+        }
+        return lhs < rhs;
+    }
+};
+
+TYPED_TEST(MemtableTest, AlreadyAdmittedWritersCanFinishBeyondTheThreshold) {
+    using MemtableT = Memtable<KeyT, AdmissionGateComparator, TypeParam::value>;
+    constexpr std::size_t writer_count = 4;
+    std::barrier gate{static_cast<std::ptrdiff_t>(writer_count)};
+    auto memtable = MemtableT::create({.max_entries = 2}, AdmissionGateComparator{&gate});
+    ASSERT_EQ(memtable.insert(TestFixture::make_entry(0)).status, InsertionState::inserted);
+    std::array<std::optional<InsertionResult>, writer_count> results;
+    std::vector<std::jthread> writers;
+    for (std::size_t writer = 0; writer < writer_count; ++writer) {
+        writers.emplace_back([&, writer] {
+            AdmissionGateComparator::wait_on_next_comparison = true;
+            results[writer] = memtable.insert(TestFixture::make_entry(writer + 1));
+        });
+    }
+    writers.clear();
+
+    for (const auto& result : results) {
+        ASSERT_TRUE(result);
+        EXPECT_EQ(result->status, InsertionState::inserted);
+        EXPECT_TRUE(result->flush_required);
+    }
+    EXPECT_EQ(memtable.size(), 1 + writer_count);
+    EXPECT_GT(memtable.size(), memtable.max_entries());
+    EXPECT_TRUE(memtable.flush_required());
+    for (KeyT key = 0; key <= writer_count; ++key) {
+        EXPECT_EQ(memtable.lookup(key).state(), QueryState::value);
+    }
+    expect_insertion_result(memtable.insert(TestFixture::make_entry(100)), memtable,
+        InsertionState::memtable_full, 1 + writer_count, true);
+}
+
+struct alignas(std::max_align_t) MaxAlignedKey {
+    std::array<std::uint8_t, alignof(std::max_align_t)> bytes{};
+};
+
+struct MaxAlignedKeyComparator {
+    auto operator()(const MaxAlignedKey& lhs, const MaxAlignedKey& rhs) const noexcept -> bool {
+        return lhs.bytes < rhs.bytes;
+    }
+};
+
+static_assert(PhysicalKey<MaxAlignedKey>);
+static_assert(alignof(MaxAlignedKey) == alignof(std::max_align_t));
+
+TYPED_TEST(MemtableTest, DefaultAllocatorSupportsTheMaximumAcceptedEntryAlignment) {
+    using MemtableT = Memtable<MaxAlignedKey, MaxAlignedKeyComparator, TypeParam::value>;
+    using EntryT = typename MemtableT::EntryT;
+    static_assert(alignof(EntryT) == alignof(std::max_align_t));
+    auto memtable = MemtableT::create({.max_entries = 64});
+    for (std::uint8_t value = 0; value < 64; ++value) {
+        MaxAlignedKey key;
+        key.bytes[0] = value;
+        const auto entry = [&] {
+            if constexpr (TypeParam::value) {
+                return EntryT::make(key, 1);
+            } else {
+                return EntryT::make(key, value, 1);
+            }
+        }();
+        EXPECT_EQ(memtable.insert(entry).status, InsertionState::inserted);
+    }
+    EXPECT_EQ(memtable.size(), 64);
+    EXPECT_TRUE(memtable.flush_required());
+    for (std::uint8_t value = 0; value < 64; ++value) {
+        MaxAlignedKey key;
+        key.bytes[0] = value;
+        const auto lookup = memtable.lookup(key);
+        ASSERT_TRUE(lookup.entry());
+        EXPECT_EQ(lookup.entry()->key.bytes, key.bytes);
+        const auto successor = memtable.successor(key);
+        if (value == 63) {
+            EXPECT_EQ(successor.state(), QueryState::not_found);
+        } else {
+            ASSERT_TRUE(successor.entry());
+            EXPECT_EQ(successor.entry()->key.bytes[0], value + 1);
+        }
+    }
+}
+
 TYPED_TEST(MemtableTest, InvalidKindsPreserveEmptyWritableAndFullStates) {
     using TrackedMemtableT = typename TestFixture::TrackedMemtableT;
     const auto large_threshold = std::numeric_limits<std::size_t>::max();
